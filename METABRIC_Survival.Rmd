@@ -1,0 +1,161 @@
+---
+title: "METABRIC Breast Cancer Survival Analysis"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+date: "2025-06-24"
+---
+
+
+```{r}
+
+library(tidyverse)
+library(survival)
+library(survminer)
+
+# Importing the dataset for analysis
+metabric <- read_csv("Breast Cancer METABRIC.csv")
+
+colnames(metabric)
+
+```
+
+```{r}
+# Inspecting the structure of our dataset
+str(metabric)
+
+# Quick summary of the dataset
+summary(metabric)
+```
+
+```{r}
+# Cleaning my dataset for analysis
+metabric_clean <- metabric %>%
+  rename(
+    time_raw = `Overall Survival (Months)`,
+    status_raw = `Overall Survival Status`,
+    age = `Age at Diagnosis`,
+    stage = `Tumor Stage`,
+    size = `Tumor Size`,
+    grade = `Neoplasm Histologic Grade`,
+    ER = `ER Status`,
+    PR = `PR Status`,
+    HER2 = `HER2 Status`
+  ) %>%
+  filter(
+    !is.na(time_raw),
+    !is.na(status_raw),
+    !is.na(stage),
+    time_raw > 0
+  ) %>%
+  mutate(
+    time = time_raw,
+    event = ifelse(status_raw == "Deceased", 1, 0),
+    stage = factor(stage),
+    grade = factor(grade),
+    ER = factor(ER),
+    PR = factor(PR),
+    HER2 = factor(HER2)
+  ) %>%
+  select(time, event, age, stage, size, grade, ER, PR, HER2)
+
+dim(metabric_clean)
+table(metabric_clean$event)
+table(metabric_clean$stage, useNA = "always")
+
+```
+
+```{r}
+# Overall Kaplan-Meier
+km_overall <- survfit(Surv(time, event) ~ 1, data = metabric_clean)
+
+ggsurvplot(
+  km_overall,
+  data = metabric_clean,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  risk.table.y.text = FALSE,
+  risk.table.height = 0.25,
+  tables.theme = theme_cleantable(),
+  xlab = "Time (Months)",
+  ylab = "Survival Probability",
+  title = "Kaplan-Meier Overall Survival",
+  ggtheme = theme_bw(),
+  tables.ggtheme = theme_bw()
+)
+
+```
+
+```{r}
+# Stage-specific Kaplan-Meier
+
+metabric_stage <- metabric_clean %>%
+  filter(!is.na(stage), stage != "0") %>%  
+  mutate(stage = droplevels(stage))        
+
+table(metabric_stage$stage)
+
+km_stage <- survfit(Surv(time, event) ~ stage, data = metabric_stage)
+  
+ggsurvplot(km_stage,
+           data = metabric_stage,
+           conf.int = TRUE,
+           risk.table = TRUE,
+           risk.table.y.text = FALSE,  
+           risk.table.height = 0.25,   
+           tables.theme = theme_cleantable(),  
+           pval = TRUE,
+           pval.coord = c(200, 0.1),   
+           legend.title = "Tumor Stage",
+           legend.labs = c("Stage I", "Stage II", "Stage III", "Stage IV"),
+           xlab = "Time (Months)",
+           ylab = "Survival Probability",
+           title = "Kaplan-Meier Survival by Tumor Stage",
+           ggtheme = theme_bw(),       
+           tables.ggtheme = theme_bw())
+```
+
+```{r}
+# Running a Cox PH model with key clinical predictors
+cox_model <- coxph(Surv(time, event) ~ age + stage + size + grade + ER + PR + HER2,
+                   data = metabric_clean)
+
+summary(cox_model)
+```
+
+```{r}
+# Visualizing the Cox model results
+metabric_clean_df <- as.data.frame(metabric_clean)
+
+ggforest(cox_model, data = metabric_clean_df)
+```
+
+```{r}
+# Testing proportional hazards assumption
+cox_zph_test <- cox.zph(cox_model)
+print(cox_zph_test)  # Smaller p-values suggest evidence against PH
+
+# Ploting residuals (straight lines = assumption holds)
+plot(cox_zph_test, 
+     main = "Scaled Schoenfeld Residuals",
+     xlab = "Transformed Time")
+abline(h = 0, col = "red", lty = 2)
+```
+
+```{r}
+# Revised Cox model to address PH violation and the following was done:
+# - stage was handled with stratification
+# - age was handled as a time-dependent covariate
+cox_revised <- coxph(
+  Surv(time, event) ~ age + tt(age) + size + grade + ER + PR + HER2 + strata(stage),
+  data = metabric_clean,
+  tt = function(x, t, ...) x * log(t + 1)
+)
+
+summary(cox_revised)
+
+# Note:
+# cox.zph() is not used on cox_revised because models with tt() terms
+# are not compatible with the standard Schoenfeld residual test
+```
