@@ -1,15 +1,31 @@
 ---
 title: "METABRIC Breast Cancer Survival Analysis"
 output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: show
   pdf_document: default
-  html_document: default
   word_document: default
-date: "2025-06-24"
 ---
 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(knitr)
+library(kableExtra)
+```
+
+## Overview
+
+This analysis uses the METABRIC (Molecular Taxonomy of Breast Cancer International Consortium) dataset to look at overall survival in breast cancer patients. The dataset has 2,509 patients with 34 clinical and molecular variables. The goal here is to first describe survival patterns using Kaplan-Meier curves, then model the effect of key clinical predictors using Cox proportional hazards regression.
+
+---
+
+## Loading the Data
 
 ```{r}
-
 library(tidyverse)
 library(survival)
 library(survminer)
@@ -18,8 +34,13 @@ library(survminer)
 metabric <- read_csv("Breast Cancer METABRIC.csv")
 
 colnames(metabric)
-
 ```
+
+The dataset comes in with 34 columns covering patient demographics, tumor characteristics, treatment history, and survival outcomes. The key variables we'll be using are overall survival time, survival status, tumor stage, grade, size, and receptor statuses (ER, PR, HER2).
+
+---
+
+## Exploratory Data Check
 
 ```{r}
 # Inspecting the structure of our dataset
@@ -29,8 +50,14 @@ str(metabric)
 summary(metabric)
 ```
 
+A quick look at the structure shows a mix of numeric and character columns. Worth noting that several key variables have missing data — `Overall Survival (Months)` and `Overall Survival Status` each have 528 missing values, and `Tumor Stage` has 721. We'll handle these in the cleaning step.
+
+---
+
+## Data Cleaning
+
 ```{r}
-# Cleaning my dataset for analysis
+# Cleaning the dataset for analysis
 metabric_clean <- metabric %>%
   rename(
     time_raw = `Overall Survival (Months)`,
@@ -61,10 +88,29 @@ metabric_clean <- metabric %>%
   select(time, event, age, stage, size, grade, ER, PR, HER2)
 
 dim(metabric_clean)
-table(metabric_clean$event)
-table(metabric_clean$stage, useNA = "always")
 
+table(metabric_clean$event) %>%
+  as.data.frame() %>%
+  rename(Event = Var1, Count = Freq) %>%
+  kable(caption = "Event Distribution (0 = Alive, 1 = Deceased)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+table(metabric_clean$stage, useNA = "always") %>%
+  as.data.frame() %>%
+  rename(Stage = Var1, Count = Freq) %>%
+  kable(caption = "Tumor Stage Distribution") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
 ```
+
+After filtering out rows with missing survival time, survival status, or tumor stage, we're left with **1,466 patients** — down from 2,509. That's a meaningful reduction, mostly driven by the 721 missing tumor stage values. It's worth keeping in mind that this missingness isn't necessarily random and could introduce some selection bias.
+
+The stage distribution in the cleaned dataset skews heavily toward Stage II (825 patients), with Stage IV being quite small (only 10 patients). A few patients are coded as Stage 0, which we'll exclude from the stage-specific analysis since it's not really comparable to the invasive stages.
+
+Also note that while PR and HER2 have no missing values in the cleaned subset, tumor size is missing for 7 patients and grade for 58. These rows will be silently dropped when we run the Cox model, so the effective sample size there will be slightly smaller.
+
+---
+
+## Kaplan-Meier: Overall Survival
 
 ```{r}
 # Overall Kaplan-Meier
@@ -84,37 +130,54 @@ ggsurvplot(
   ggtheme = theme_bw(),
   tables.ggtheme = theme_bw()
 )
-
 ```
 
+The overall KM curve gives a baseline picture of survival across all 1,466 patients. The shaded region is the 95% confidence interval, and the risk table below the plot shows how many patients remain under observation at each time point. The curve drops fairly steadily over time, and the widening confidence interval toward the right reflects fewer patients remaining at risk in later follow-up.
+
+---
+
+## Kaplan-Meier: Survival by Tumor Stage
+
 ```{r}
-# Stage-specific Kaplan-Meier
-
+# Stage-specific Kaplan-Meier — excluding Stage 0 since it's not comparable to invasive stages
 metabric_stage <- metabric_clean %>%
-  filter(!is.na(stage), stage != "0") %>%  
-  mutate(stage = droplevels(stage))        
+  filter(!is.na(stage), stage != "0") %>%
+  mutate(stage = droplevels(stage))
 
+# Confirm stage counts before plotting
 table(metabric_stage$stage)
 
 km_stage <- survfit(Surv(time, event) ~ stage, data = metabric_stage)
-  
+
+# Dynamically generate stage labels based on remaining levels
+stage_levels <- levels(metabric_stage$stage)
+stage_labels <- paste("Stage", as.roman(as.integer(stage_levels)))
+
 ggsurvplot(km_stage,
            data = metabric_stage,
            conf.int = TRUE,
            risk.table = TRUE,
-           risk.table.y.text = FALSE,  
-           risk.table.height = 0.25,   
-           tables.theme = theme_cleantable(),  
+           risk.table.y.text = FALSE,
+           risk.table.height = 0.25,
+           tables.theme = theme_cleantable(),
            pval = TRUE,
-           pval.coord = c(200, 0.1),   
+           pval.coord = c(200, 0.1),
            legend.title = "Tumor Stage",
-           legend.labs = c("Stage I", "Stage II", "Stage III", "Stage IV"),
+           legend.labs = stage_labels,
            xlab = "Time (Months)",
            ylab = "Survival Probability",
            title = "Kaplan-Meier Survival by Tumor Stage",
-           ggtheme = theme_bw(),       
+           ggtheme = theme_bw(),
            tables.ggtheme = theme_bw())
 ```
+
+As expected, survival probability decreases with higher tumor stage. Stage I patients have the best outcomes, while Stage IV patients have a noticeably steeper decline early on. The log-rank p-value confirms that the differences between stages are statistically significant.
+
+One thing to keep in mind with Stage IV is the very small sample size (only 10 patients after cleaning), so the curve for that group should be interpreted with caution — the confidence intervals would be wide and the estimates less reliable.
+
+---
+
+## Cox Proportional Hazards Model
 
 ```{r}
 # Running a Cox PH model with key clinical predictors
@@ -131,22 +194,38 @@ metabric_clean_df <- as.data.frame(metabric_clean)
 ggforest(cox_model, data = metabric_clean_df)
 ```
 
-```{r}
-# Testing proportional hazards assumption
-cox_zph_test <- cox.zph(cox_model)
-print(cox_zph_test)  # Smaller p-values suggest evidence against PH
+The Cox model estimates the effect of each predictor on hazard (risk of death) while adjusting for the others. Hazard ratios (HR) above 1 indicate increased risk, below 1 indicate reduced risk. The forest plot makes it easy to see which variables have the strongest effects and whether their confidence intervals cross 1 (no effect).
 
-# Ploting residuals (straight lines = assumption holds)
+A few things to note here: the model loses a few more rows due to missing tumor size and grade values, so the actual n used in fitting is slightly lower than 1,466. This is standard behavior in R's `coxph()` — it uses complete cases by default.
+
+---
+
+## Testing the Proportional Hazards Assumption
+
+```{r}
+# Testing the proportional hazards assumption
+cox_zph_test <- cox.zph(cox_model)
+print(cox_zph_test)  # Smaller p-values suggest evidence against the PH assumption
+
+# Plotting residuals (straight lines = assumption holds)
 plot(cox_zph_test, 
      main = "Scaled Schoenfeld Residuals",
      xlab = "Transformed Time")
 abline(h = 0, col = "red", lty = 2)
 ```
 
+The proportional hazards assumption requires that the effect of each predictor stays constant over time. We test this using scaled Schoenfeld residuals — if the residuals trend over time, it's a sign the assumption is violated.
+
+Any variables with a significant p-value in the `cox.zph()` output are flagging potential violations. This is what motivates the revised model below.
+
+---
+
+## Revised Cox Model (Addressing PH Violations)
+
 ```{r}
-# Revised Cox model to address PH violation and the following was done:
-# - stage was handled with stratification
-# - age was handled as a time-dependent covariate
+# Revised Cox model addressing PH violations:
+# - stage is handled with stratification (removes it from the hazard equation but adjusts for it)
+# - age is modeled as a time-dependent covariate using tt(), allowing its effect to change over time
 cox_revised <- coxph(
   Surv(time, event) ~ age + tt(age) + size + grade + ER + PR + HER2 + strata(stage),
   data = metabric_clean,
@@ -155,7 +234,14 @@ cox_revised <- coxph(
 
 summary(cox_revised)
 
-# Note:
-# cox.zph() is not used on cox_revised because models with tt() terms
-# are not compatible with the standard Schoenfeld residual test
+# Note: cox.zph() cannot be used on this model because tt() terms are not
+# compatible with the standard Schoenfeld residual test
 ```
+
+For the revised model, two changes were made to address the PH violations identified above:
+
+**Stage** was handled using stratification (`strata(stage)`). This means the stage is no longer estimated as a single hazard ratio — instead, the model fits a separate baseline hazard for each stage. This is a common approach when a variable violates PH but you still want to adjust for it.
+
+**Age** was modeled as a time-dependent covariate using `tt()`, with the interaction term `age * log(t + 1)`. This lets the effect of age on hazard change as a function of follow-up time, rather than assuming it stays constant throughout.
+
+The trade-off is that this revised model is harder to interpret directly — particularly for stage, since we no longer get a single HR for it. But it gives us more honest estimates for the remaining predictors.
